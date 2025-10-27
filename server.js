@@ -366,36 +366,38 @@ app.post("/call-instructor", async (req, res) => {
   await db.write();
 
   //==== send embed to Discord channel
-  if (REPORT_CHANNEL_ID) {
-    let roleToPing = "";
-    if (testType === "radio") roleToPing = `<@&${INSTRUCTOR_RADIO}>`;
-    if (testType === "mdt") roleToPing = `<@&${INSTRUCTOR_MDT}>`;
-    if (testType === "academie") roleToPing = `<@&${TESTER_GENERAL}>`;
+if (REPORT_CHANNEL_ID) {
+  let roleToPing = "";
 
-    const embed = {
-      title: "Call Instructor",
-      color: 16753920,
-      fields: [
-        { name: "Solicitant", value: ping.requester.tag },
-        { name: "Test", value: testType },
-        { name: "Notă", value: note || "—" },
-        { name: "ID Ping", value: id },
-      ],
-      timestamp: ping.time,
-    };
+  if (testType === "radio") roleToPing = `<@&${INSTRUCTOR_RADIO}>`;
+  if (testType === "mdt") roleToPing = `<@&${INSTRUCTOR_MDT}>`;
+  if (testType === "academie") roleToPing = `<@&${TESTER_GENERAL}>`;
 
-    await fetch(`https://discord.com/api/v10/channels/${REPORT_CHANNEL_ID}/messages`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bot ${DISCORD_BOT_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        content: `${roleToPing} instructor necesar!`,
-        embeds: [embed],
-      }),
-    });
-  }
+  const embed = {
+    title: "Solicitare Instructor",
+    color: 16753920,
+    fields: [
+      { name: "Solicitant", value: ping.requester.tag || "Unknown" },
+      { name: "Test", value: testType || "Unknown" },
+      { name: "Notă", value: (note && note.trim()) ? note : "—" },
+      { name: "ID Ping", value: id },
+    ],
+    timestamp: new Date(ping.time).toISOString(),
+  };
+
+  await fetch(`https://discord.com/api/v10/channels/${REPORT_CHANNEL_ID}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bot ${DISCORD_BOT_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      content: `${roleToPing} instructor necesar!`,
+      embeds: [embed],
+    }),
+  });
+}
+
 
   broadcast({ type: "ping", payload: ping });
   res.json({ ok: true, id });
