@@ -26,7 +26,7 @@ app.use(
     saveUninitialized: true,
     cookie: {
       secure: true,
-      sameSite: "lax",
+      sameSite: "none", // <— EXTRA IMPORTANT
     },
   })
 );
