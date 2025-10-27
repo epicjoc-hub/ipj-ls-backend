@@ -1,251 +1,265 @@
-// server.js — Koyeb-ready, OAuth2 + Roles + Tests + Anti-Cheat + Embeds
-
 import express from "express";
 import session from "express-session";
 import fetch from "node-fetch";
 import cors from "cors";
-import dotenv from "dotenv";
 import crypto from "crypto";
+import dotenv from "dotenv";
 import { Low } from "lowdb";
 import { JSONFile } from "lowdb/node";
-import { fileURLToPath } from "url";
 import path from "path";
+import { fileURLToPath } from "url";
 
 dotenv.config();
 
+// dirname fix
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// express
 const app = express();
-
-// Koyeb/Proxy & secure cookies cross-domain
-app.set("trust proxy", 1);
-
 app.use(express.json());
+app.use(cors({ origin: true, credentials: true }));
 
-// CORS strict către frontend (Vercel)
-app.use(cors({
-  origin: process.env.FRONTEND_URL,
-  credentials: true,
-}));
+// session storage
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET || "REPLACE_THIS",
+    resave: false,
+    saveUninitialized: true,
+    cookie: { secure: false },
+  })
+);
 
-// Cookie de sesiune cross-site (Vercel <-> Koyeb)
-app.use(session({
-  secret: process.env.SESSION_SECRET || "changeme",
-  resave: false,
-  saveUninitialized: true,
-  cookie: {
-    secure: true,      // necesar pt SameSite=None
-    sameSite: "none"   // cross-site cookie
-  }
-}));
-
-// === lowdb storage ===
+// lowdb setup
 const file = path.join(__dirname, "db.json");
 const adapter = new JSONFile(file);
 const db = new Low(adapter);
 
-await db.read();
-db.data ||= { testers: {}, tests: {}, configs: {}, questionBank: {}, antiCheat: {}, exams: {} };
-// Seturi implicite pentru question bank
-db.data.questionBank.academie ||= [
-  { id: "ac1", text: "Care e frecvența standard radio IPJ?", answers: ["10.1", "100.1", "911", "112"], correctIndex: 0 },
-  { id: "ac2", text: "Cod 10-20 înseamnă?", answers: ["Locația", "Sos de roșii", "Ajutor!", "Terminare tură"], correctIndex: 0 },
-  { id: "ac3", text: "MDT se folosește pentru?", answers: ["Verificări/rapoarte", "Muzică", "Jocuri", "Social"], correctIndex: 0 }
-];
-db.data.questionBank.radio ||= [
-  { id: "ra1", text: "Ce înseamnă QAP?", answers: ["Așteaptă", "Am primit", "Termină", "Repetă"], correctIndex: 1 }
-];
-db.data.questionBank.mdt ||= [
-  { id: "md1", text: "Unde încarci un raport de arest?", answers: ["MDT -> Raport", "Discord", "Email", "Fax"], correctIndex: 0 }
-];
-await db.write();
+async function initDB() {
+  await db.read();
+  db.data ||= { testers: {}, tests: {}, configs: {} };
+  await db.write();
+}
+await initDB();
 
-// === ENV ===
+// env
 const {
-  // infrastructură
-  FRONTEND_URL,
-  SESSION_SECRET,
-
-  // Discord app/bot
   DISCORD_CLIENT_ID,
   DISCORD_CLIENT_SECRET,
   DISCORD_REDIRECT_URI,
   DISCORD_BOT_TOKEN,
   GUILD_ID,
-
-  // Roluri
   TESTER_ROLE_IDS,
   EDITOR_ROLE_IDS,
-
-  // Raportare
-  REPORT_CHANNEL_ID
+  REPORT_CHANNEL_ID,
 } = process.env;
 
-const testerRoles = (TESTER_ROLE_IDS || "").split(",").map(r => r.trim()).filter(Boolean);
-const editorRoles = (EDITOR_ROLE_IDS || "").split(",").map(r => r.trim()).filter(Boolean);
+// parse role lists
+const testerRoles = (TESTER_ROLE_IDS || "")
+  .split(",")
+  .map((r) => r.trim())
+  .filter(Boolean);
 
-// === Helpers ===
-function shuffle(arr) {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
-function makeExamId() { return crypto.randomBytes(9).toString("hex"); }
-function genTesterCode() { return crypto.randomBytes(4).toString("hex").toUpperCase(); }
+const editorRoles = (EDITOR_ROLE_IDS || "")
+  .split(",")
+  .map((r) => r.trim())
+  .filter(Boolean);
 
-async function getGuildMember(id) {
-  const res = await fetch(`https://discord.com/api/v10/guilds/${GUILD_ID}/members/${id}`, {
-    headers: { Authorization: "Bot " + DISCORD_BOT_TOKEN }
-  });
-  return res.ok ? res.json() : null;
+// helper: gen code
+function genTesterCode() {
+  return crypto.randomBytes(3).toString("hex").toUpperCase();
 }
+
+// helper get user info
 async function getUserInfo(access_token) {
-  const r = await fetch("https://discord.com/api/v10/users/@me", {
-    headers: { Authorization: "Bearer " + access_token }
+  const res = await fetch("https://discord.com/api/v10/users/@me", {
+    headers: { Authorization: `Bearer ${access_token}` },
   });
-  return r.ok ? r.json() : null;
+  if (!res.ok) return null;
+  return await res.json();
 }
 
-// — OAuth Login
+// helper get member
+async function getGuildMember(id) {
+  const res = await fetch(
+    `https://discord.com/api/v10/guilds/${GUILD_ID}/members/${id}`,
+    {
+      headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` },
+    }
+  );
+  if (!res.ok) return null;
+  return await res.json();
+}
+
+/* =======================
+   AUTH START
+======================= */
+
+// login redirect
 app.get("/auth/discord", (req, res) => {
   const params = new URLSearchParams({
     client_id: DISCORD_CLIENT_ID,
     redirect_uri: DISCORD_REDIRECT_URI,
     response_type: "code",
-    scope: "identify"
-  });
-  res.redirect(`https://discord.com/oauth2/authorize?${params.toString()}`);
+    scope: "identify guilds.members.read",
+    prompt: "consent",
+  }).toString();
+
+  res.redirect(`https://discord.com/oauth2/authorize?${params}`);
 });
 
-// Fallback
-app.get("/auth/callback", (req, res) => {
-  const q = req.originalUrl.includes("?") ? req.originalUrl.slice(req.originalUrl.indexOf("?")) : "";
-  res.redirect("/auth/discord/callback" + q);
-});
+// callback
+app.get("/auth/discord/callback", async (req, res) => {
+  const { code } = req.query;
+  if (!code) return res.send("Missing code");
 
-// — OAuth callback
-app.get("https://ipjlossantos.netlify.app/dashboard", async (req, res) => {
-  const code = req.query.code;
-  if (!code) return res.status(400).send("Missing code.");
-
-  const tokenRes = await fetch("https://discord.com/api/oauth2/token", {
+  const tokenRes = await fetch("https://discord.com/api/v10/oauth2/token", {
     method: "POST",
-    headers: { "Content-Type":"application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       client_id: DISCORD_CLIENT_ID,
       client_secret: DISCORD_CLIENT_SECRET,
       grant_type: "authorization_code",
       code,
-      redirect_uri: DISCORD_REDIRECT_URI
-    })
+      redirect_uri: DISCORD_REDIRECT_URI,
+    }),
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
   });
 
-  if (!tokenRes.ok) return res.status(500).send("OAuth token exchange failed");
+  const tokenData = await tokenRes.json();
+  if (!tokenData.access_token) return res.send("OAuth failed");
 
-  const token = await tokenRes.json();
-  const user = await getUserInfo(token.access_token);
-
+  const user = await getUserInfo(tokenData.access_token);
   const member = await getGuildMember(user.id);
+
   const roles = member?.roles || [];
+  const isTester = roles.some((r) => testerRoles.includes(r));
+  const isEditor = roles.some((r) => editorRoles.includes(r));
 
-  const isTester = roles.some(r => testerRoles.includes(r));
-  const isEditor = roles.some(r => editorRoles.includes(r));
-
+  // gen code if tester
   await db.read();
-  let entry = Object.entries(db.data.testers).find(([,v]) => v.userId === user.id);
+  let entry = Object.entries(db.data.testers).find(
+    ([, v]) => v.userId === user.id
+  );
+
   if (isTester && !entry) {
-    let code; do { code = genTesterCode(); }
-    while (db.data.testers[code]);
-    db.data.testers[code] = { userId: user.id, createdAt: Date.now() };
+    let code;
+    do {
+      code = genTesterCode();
+    } while (db.data.testers[code]);
+
+    db.data.testers[code] = {
+      userId: user.id,
+      createdAt: new Date().toISOString(),
+    };
     await db.write();
   }
 
   req.session.user = {
     id: user.id,
-    tag: `${user.username}#${user.discriminator}`,
+    username: `${user.username}#${user.discriminator}`,
     isTester,
-    isEditor
+    isEditor,
   };
 
-  res.redirect(`${FRONTEND_URL}/dashboard`);
+  // FINAL redirect to NETLIFY dashboard
+  res.redirect("https://ipjlossantos.netlify.app/dashboard");
 });
 
-// — Check roles
+/* =======================
+   SESSION CHECK
+======================= */
+
 app.get("/check-tester", async (req, res) => {
   const u = req.session.user;
   if (!u) return res.json({ authenticated: false });
 
   const member = await getGuildMember(u.id);
   const roles = member?.roles || [];
-  res.json({
+
+  return res.json({
     authenticated: true,
-    discord_tag: u.tag,
-    isTester: roles.some(r => testerRoles.includes(r)),
-    isEditor: roles.some(r => editorRoles.includes(r))
+    id: u.id,
+    discord: u.username,
+    isTester: roles.some((r) => testerRoles.includes(r)),
+    isEditor: roles.some((r) => editorRoles.includes(r)),
   });
 });
 
-// Stats for charts
-app.get("/tests/stats", async (req, res) => {
+/* =======================
+   SUBMIT TEST
+======================= */
+
+app.post("/submit-test", async (req, res) => {
+  const { testerCode, testType, result, details } = req.body;
+
   await db.read();
+  const entry = db.data.testers[testerCode];
+  if (!entry) return res.json({ error: "Cod invalid" });
 
-  const tests = Object.values(db.data.tests || []);
+  const userId = entry.userId;
 
-  const byType = {};
-  const byResult = { ADMIS: 0, RESPINS: 0 };
-  const byDay = {};
+  const id = crypto.randomBytes(6).toString("hex");
+  db.data.tests[id] = {
+    id,
+    testerCode,
+    userId,
+    testType,
+    result,
+    details,
+    createdAt: new Date().toISOString(),
+  };
+  await db.write();
 
-  tests.forEach(t => {
-    // by type
-    byType[t.testType] = (byType[t.testType] || 0) + 1;
+  if (REPORT_CHANNEL_ID) {
+    try {
+      const embed = {
+        title: "Raport Test",
+        color: result === "ADMIS" ? 5763719 : 15548997,
+        fields: [
+          { name: "Rezultat", value: result },
+          { name: "Tip", value: testType },
+          { name: "Detalii", value: details || "—" },
+        ],
+        footer: { text: `UserID: ${userId}` },
+        timestamp: new Date().toISOString(),
+      };
 
-    // by result
-    if (t.result === "ADMIS") byResult.ADMIS++;
-    else byResult.RESPINS++;
+      await fetch(
+        `https://discord.com/api/v10/channels/${REPORT_CHANNEL_ID}/messages`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bot ${DISCORD_BOT_TOKEN}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ embeds: [embed] }),
+        }
+      );
+    } catch {}
+  }
 
-    // by day
-    const day = t.createdAt.split("T")[0];
-    byDay[day] = (byDay[day] || 0) + 1;
-  });
-
-  res.json({ byType, byResult, byDay });
+  res.json({ ok: true });
 });
 
-// Return test history (latest first)
-app.get("/tests/history", async (req, res) => {
-  await db.read();
-  const tests = Object.values(db.data.tests || {}).sort((a, b) => {
-    return new Date(b.createdAt) - new Date(a.createdAt);
-  });
+/* =======================
+   ADMIN CONFIG TEST
+======================= */
 
-  res.json({ tests });
-});
-
-
-// — Admin tester mapping
-app.get("/admin/tester-mapping", async (req, res) => {
+async function requireEditor(req, res, next) {
   const u = req.session.user;
-  if (!u) return res.status(401).json({ error: "no auth" });
-  const m = await getGuildMember(u.id);
-  if (!m?.roles?.some(r => editorRoles.includes(r))) return res.status(403).json({ error: "forbidden" });
+  if (!u) return res.status(401).json({ error: "Not auth" });
 
-  await db.read();
-  res.json({ testers: db.data.testers });
-});
+  const member = await getGuildMember(u.id);
+  const roles = member?.roles || [];
 
-// — Config tests
-app.post("/manage-tests/config", async (req, res) => {
-  const u = req.session.user;
-  if (!u) return res.status(401).json({ error: "no auth" });
-  const m = await getGuildMember(u.id);
-  if (!m?.roles?.some(r => editorRoles.includes(r))) return res.status(403).json({ error: "forbidden" });
+  if (!roles.some((r) => editorRoles.includes(r)))
+    return res.status(403).json({ error: "Forbidden" });
 
+  next();
+}
+
+app.post("/manage-tests/config", requireEditor, async (req, res) => {
   const { testName, timeLimitSeconds, questionsCount, maxMistakes } = req.body;
-  if (!testName) return res.status(400).json({ error: "missing testName" });
 
   await db.read();
   db.data.configs[testName] = {
@@ -253,26 +267,50 @@ app.post("/manage-tests/config", async (req, res) => {
     timeLimitSeconds,
     questionsCount,
     maxMistakes,
-    updatedAt: Date.now()
   };
   await db.write();
 
   res.json({ ok: true, config: db.data.configs[testName] });
 });
 
-// — Get test config
-app.get("/tests/config", async (req, res) => {
-  const { testName } = req.query;
-  if (!testName) return res.status(400).json({ error: "missing testName" });
+/* =======================
+   HISTORY
+======================= */
+
+app.get("/tests/history", async (req, res) => {
   await db.read();
-  res.json({ ok: true, config: db.data.configs[testName] });
+  const tests = Object.values(db.data.tests).sort(
+    (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+  );
+  res.json({ tests });
 });
 
-// !!! restul (questions, anti-cheat, submit) sunt deja incluse în această versiune !!!
+/* =======================
+   STATS
+======================= */
 
-// — health
-app.get("/", (req, res) => res.redirect("https://ipjlossantos.netlify.app/dashboard");
-);
+app.get("/tests/stats", async (req, res) => {
+  await db.read();
+  const tests = Object.values(db.data.tests);
+
+  const byType = {};
+  const byResult = { ADMIS: 0, RESPINS: 0 };
+  const byDay = {};
+
+  tests.forEach((t) => {
+    byType[t.testType] = (byType[t.testType] || 0) + 1;
+    byResult[t.result]++;
+
+    const day = t.createdAt.split("T")[0];
+    byDay[day] = (byDay[day] || 0) + 1;
+  });
+
+  res.json({ byType, byResult, byDay });
+});
+
+/* =======================
+   START SERVER
+======================= */
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("✅ Backend running on", PORT));
