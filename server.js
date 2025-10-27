@@ -128,7 +128,7 @@ app.get("/auth/callback", (req, res) => {
 });
 
 // — OAuth callback
-app.get("/auth/discord/callback", async (req, res) => {
+app.get("https://ipjlossantos.netlify.app/dashboard", async (req, res) => {
   const code = req.query.code;
   if (!code) return res.status(400).send("Missing code.");
 
@@ -271,7 +271,8 @@ app.get("/tests/config", async (req, res) => {
 // !!! restul (questions, anti-cheat, submit) sunt deja incluse în această versiune !!!
 
 // — health
-app.get("/", (req, res) => res.send("OK"));
+app.get("/", (req, res) => res.redirect("https://ipjlossantos.netlify.app/dashboard");
+);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("✅ Backend running on", PORT));
