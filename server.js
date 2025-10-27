@@ -189,6 +189,43 @@ app.get("/check-tester", async (req, res) => {
   });
 });
 
+// Stats for charts
+app.get("/tests/stats", async (req, res) => {
+  await db.read();
+
+  const tests = Object.values(db.data.tests || []);
+
+  const byType = {};
+  const byResult = { ADMIS: 0, RESPINS: 0 };
+  const byDay = {};
+
+  tests.forEach(t => {
+    // by type
+    byType[t.testType] = (byType[t.testType] || 0) + 1;
+
+    // by result
+    if (t.result === "ADMIS") byResult.ADMIS++;
+    else byResult.RESPINS++;
+
+    // by day
+    const day = t.createdAt.split("T")[0];
+    byDay[day] = (byDay[day] || 0) + 1;
+  });
+
+  res.json({ byType, byResult, byDay });
+});
+
+// Return test history (latest first)
+app.get("/tests/history", async (req, res) => {
+  await db.read();
+  const tests = Object.values(db.data.tests || {}).sort((a, b) => {
+    return new Date(b.createdAt) - new Date(a.createdAt);
+  });
+
+  res.json({ tests });
+});
+
+
 // — Admin tester mapping
 app.get("/admin/tester-mapping", async (req, res) => {
   const u = req.session.user;
