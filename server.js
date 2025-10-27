@@ -34,7 +34,9 @@ app.use(
   })
 );
 
-// lowdb
+//=========================
+// DB (lowdb)
+//=========================
 const file = path.join(__dirname, "db.json");
 const adapter = new JSONFile(file);
 const db = new Low(adapter);
@@ -42,38 +44,43 @@ await db.read();
 db.data ||= { testers: {}, tests: {}, configs: {}, duty: {}, pings: [] };
 await db.write();
 
-// ENV
+//=========================
+// ENV variables
+//=========================
 const {
   DISCORD_CLIENT_ID,
   DISCORD_CLIENT_SECRET,
   DISCORD_REDIRECT_URI,
   DISCORD_BOT_TOKEN,
   GUILD_ID,
-  TESTER_ROLE_IDS,
-  EDITOR_ROLE_IDS,
   FRONTEND_BASE_URL,
   REPORT_CHANNEL_ID,
   INSTRUCTOR_RADIO,
   INSTRUCTOR_MDT,
   TESTER_GENERAL,
+  TESTER_ROLE_IDS,
+  EDITOR_ROLE_IDS,
 } = process.env;
 
-// roles
-const testerRoles      = (TESTER_ROLE_IDS || "").split(",").map(s=>s.trim());
-const editorRoles      = (EDITOR_ROLE_IDS || "").split(",").map(s=>s.trim());
+// role arrays
+const testerRoles = (TESTER_ROLE_IDS || "").split(",").map((s) => s.trim());
+const editorRoles = (EDITOR_ROLE_IDS || "").split(",").map((s) => s.trim());
 
-// special
+// special single roles
 const RADIO_INSTR_ROLE = INSTRUCTOR_RADIO;
-const MDT_INSTR_ROLE   = INSTRUCTOR_MDT;
-const TESTER_ROLE_ANY  = TESTER_GENERAL;
+const MDT_INSTR_ROLE = INSTRUCTOR_MDT;
+const TESTER_ROLE_ANY = TESTER_GENERAL;
 
-// helpers
+//=========================
+// Helpers Discord API
+//=========================
 async function getUserInfo(token) {
   const r = await fetch("https://discord.com/api/v10/users/@me", {
     headers: { Authorization: `Bearer ${token}` },
   });
   return r.ok ? r.json() : null;
 }
+
 async function getGuildMember(id) {
   const r = await fetch(
     `https://discord.com/api/v10/guilds/${GUILD_ID}/members/${id}`,
@@ -82,10 +89,9 @@ async function getGuildMember(id) {
   return r.ok ? r.json() : null;
 }
 
-/* =============================
-       AUTH
-============================= */
-
+//=========================
+// AUTH
+//=========================
 app.get("/auth/discord", (req, res) => {
   const p = new URLSearchParams({
     client_id: DISCORD_CLIENT_ID,
@@ -117,12 +123,12 @@ app.get("/auth/discord/callback", async (req, res) => {
 
   const user = await getUserInfo(tokenData.access_token);
   const member = await getGuildMember(user.id);
-  const roles  = member?.roles || [];
+  const roles = member?.roles || [];
 
   const isTester = roles.some((r) => testerRoles.includes(r) || r === TESTER_ROLE_ANY);
   const isEditor = roles.some((r) => editorRoles.includes(r));
   const canRadio = roles.includes(RADIO_INSTR_ROLE);
-  const canMDT   = roles.includes(MDT_INSTR_ROLE);
+  const canMDT = roles.includes(MDT_INSTR_ROLE);
 
   req.session.user = {
     id: user.id,
@@ -133,12 +139,23 @@ app.get("/auth/discord/callback", async (req, res) => {
     canMDT,
   };
 
+  //=== COD TESTER LOGIC
+  await db.read();
+  let entry = Object.entries(db.data.testers).find(([, v]) => v.userId === user.id);
+  if (isTester && !entry) {
+    let code;
+    do code = crypto.randomBytes(3).toString("hex").toUpperCase();
+    while (db.data.testers[code]);
+    db.data.testers[code] = { userId: user.id, createdAt: new Date().toISOString() };
+    await db.write();
+  }
+
   return res.redirect(`${FRONTEND_BASE_URL}/dashboard`);
 });
 
-/* =============================
-       SESSION CHECK
-============================= */
+//=========================
+// Session check
+//=========================
 app.get("/check-tester", (req, res) => {
   const u = req.session.user;
   if (!u) return res.json({ authenticated: false });
@@ -153,10 +170,19 @@ app.get("/check-tester", (req, res) => {
   });
 });
 
-/* =============================
-       ADMIN CONFIG
-============================= */
+// tester code fetch
+app.get("/tester-code", async (req, res) => {
+  const u = req.session.user;
+  if (!u) return res.json({ code: null });
 
+  await db.read();
+  const entry = Object.entries(db.data.testers).find(([_, v]) => v.userId === u.id);
+  return res.json({ code: entry ? entry[0] : null });
+});
+
+//=========================
+// REQUIRE EDITOR
+//=========================
 async function requireEditor(req, res, next) {
   const u = req.session.user;
   if (!u) return res.status(401).json({ error: "Not auth" });
@@ -168,6 +194,9 @@ async function requireEditor(req, res, next) {
   next();
 }
 
+//=========================
+// Test config admin
+//=========================
 app.get("/config/:name", async (req, res) => {
   await db.read();
   res.json(db.data.configs[req.params.name] || {});
@@ -193,10 +222,9 @@ app.delete("/manage-tests/config/:name", requireEditor, async (req, res) => {
   res.json({ ok: true });
 });
 
-/* =============================
-       HISTORY & STATS
-============================= */
-
+//=========================
+// Tests history & stats
+//=========================
 app.get("/tests/history", async (req, res) => {
   await db.read();
   const tests = Object.values(db.data.tests).sort(
@@ -223,10 +251,9 @@ app.get("/tests/stats", async (req, res) => {
   res.json({ byType, byResult, byDay });
 });
 
-/* =============================
-       DUTY SYSTEM
-============================= */
-
+//=========================
+// DUTY LIVE SYSTEM
+//=========================
 const sseClients = new Set();
 function broadcast(obj) {
   const data = `data: ${JSON.stringify(obj)}\n\n`;
@@ -269,7 +296,7 @@ app.get("/duty/list", async (req, res) => {
   res.json(db.data.duty);
 });
 
-// ❗ Academie: DOAR dacă există tester/editor ON DUTY
+// test requirements based on duty
 app.get("/duty/allow/:type", async (req, res) => {
   const type = String(req.params.type).toLowerCase();
   await db.read();
@@ -281,14 +308,12 @@ app.get("/duty/allow/:type", async (req, res) => {
       duty,
     });
   }
-
   if (type === "radio") {
     return res.json({
       allowed: duty.some((u) => u.roles.includes("radio")),
       duty,
     });
   }
-
   if (type === "mdt") {
     return res.json({
       allowed: duty.some((u) => u.roles.includes("mdt")),
@@ -299,10 +324,9 @@ app.get("/duty/allow/:type", async (req, res) => {
   res.json({ allowed: false });
 });
 
-/* =============================
-       SSE EVENTS
-============================= */
-
+//=========================
+// SSE subscribe
+//=========================
 app.get("/events", (req, res) => {
   const u = req.session.user;
   if (!u) return res.status(401).end();
@@ -316,22 +340,18 @@ app.get("/events", (req, res) => {
 
   const client = { res, id: u.id };
   sseClients.add(client);
-  req.on("close", () => {
-    sseClients.delete(client);
-  });
+  req.on("close", () => sseClients.delete(client));
 });
 
-/* =============================
-       CALL INSTRUCTOR
-============================= */
-
+//=========================
+// CALL instructor
+//=========================
 app.post("/call-instructor", async (req, res) => {
   const { testType, note } = req.body;
   const u = req.session.user;
   if (!u) return res.status(401).json({ error: "Not auth" });
 
   const id = crypto.randomBytes(6).toString("hex");
-
   const ping = {
     id,
     testType,
@@ -345,10 +365,43 @@ app.post("/call-instructor", async (req, res) => {
   db.data.pings.push(ping);
   await db.write();
 
+  //==== send embed to Discord channel
+  if (REPORT_CHANNEL_ID) {
+    let roleToPing = "";
+    if (testType === "radio") roleToPing = `<@&${INSTRUCTOR_RADIO}>`;
+    if (testType === "mdt") roleToPing = `<@&${INSTRUCTOR_MDT}>`;
+    if (testType === "academie") roleToPing = `<@&${TESTER_GENERAL}>`;
+
+    const embed = {
+      title: "Call Instructor",
+      color: 16753920,
+      fields: [
+        { name: "Solicitant", value: ping.requester.tag },
+        { name: "Test", value: testType },
+        { name: "Notă", value: note || "—" },
+        { name: "ID Ping", value: id },
+      ],
+      timestamp: ping.time,
+    };
+
+    await fetch(`https://discord.com/api/v10/channels/${REPORT_CHANNEL_ID}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bot ${DISCORD_BOT_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        content: `${roleToPing} instructor necesar!`,
+        embeds: [embed],
+      }),
+    });
+  }
+
   broadcast({ type: "ping", payload: ping });
   res.json({ ok: true, id });
 });
 
+// accepted ping
 app.post("/ack-ping", async (req, res) => {
   const { id } = req.body;
   const u = req.session.user;
@@ -358,25 +411,51 @@ app.post("/ack-ping", async (req, res) => {
   const ping = db.data.pings.find((p) => p.id === id);
   if (!ping) return res.status(404).json({ error: "Not found" });
 
+  // role checks
   if (ping.testType === "radio" && !u.canRadio)
     return res.status(403).json({ error: "Nu ai rol Radio" });
   if (ping.testType === "mdt" && !u.canMDT)
     return res.status(403).json({ error: "Nu ai rol MDT" });
   if (ping.testType === "academie" && !(u.isTester || u.isEditor))
-    return res.status(403).json({ error: "Nu ai rol general" });
+    return res.status(403).json({ error: "Nu ai rol Academie" });
 
   ping.status = "accepted";
   ping.acceptedBy = { id: u.id, tag: u.discord_tag };
+
   await db.write();
 
   broadcast({ type: "ack", payload: ping });
   res.json({ ok: true });
 });
 
-/* =============================
-       LOGOUT
-============================= */
+//=========================
+// SUBMIT TEST (raport final)
+//=========================
+app.post("/submit-test", async (req, res) => {
+  const { testerCode, testType, result, details } = req.body;
+  await db.read();
+  const entry = db.data.testers[testerCode];
+  if (!entry) return res.json({ error: "Cod invalid" });
 
+  const userId = entry.userId;
+  const id = crypto.randomBytes(6).toString("hex");
+  db.data.tests[id] = {
+    id,
+    testerCode,
+    userId,
+    testType,
+    result,
+    details,
+    createdAt: new Date().toISOString(),
+  };
+  await db.write();
+
+  res.json({ ok: true });
+});
+
+//=========================
+// LOGOUT
+//=========================
 app.get("/logout", (req, res) => {
   req.session.destroy(() => {
     res.clearCookie("connect.sid");
@@ -384,17 +463,11 @@ app.get("/logout", (req, res) => {
   });
 });
 
-/* =============================
-       ROOT
-============================= */
-
+//=========================
 app.get("/", (req, res) => {
   res.send("✅ Backend LIVE");
 });
 
-/* =============================
-       START
-============================= */
-
+//=========================
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log("✅ Backend running on", PORT));
