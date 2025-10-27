@@ -14,13 +14,11 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Express
 const app = express();
 app.set("trust proxy", 1);
 app.use(express.json());
 app.use(cors({ origin: process.env.FRONTEND_BASE_URL, credentials: true }));
 
-// Session
 app.use(
   session({
     secret: process.env.SESSION_SECRET,
@@ -33,18 +31,14 @@ app.use(
   })
 );
 
-// LowDB
 const file = path.join(__dirname, "db.json");
 const adapter = new JSONFile(file);
 const db = new Low(adapter);
-await init();
-async function init() {
-  await db.read();
-  db.data ||= { testers: {}, tests: {}, configs: {} };
-  await db.write();
-}
 
-// Env
+await db.read();
+db.data ||= { testers: {}, tests: {}, configs: {} };
+await db.write();
+
 const {
   DISCORD_CLIENT_ID,
   DISCORD_CLIENT_SECRET,
@@ -60,7 +54,6 @@ const {
 const testerRoles = TESTER_ROLE_IDS.split(",");
 const editorRoles = EDITOR_ROLE_IDS.split(",");
 
-// Helpers
 function genTesterCode() {
   return crypto.randomBytes(3).toString("hex").toUpperCase();
 }
@@ -80,10 +73,7 @@ async function getGuildMember(id) {
   return res.ok ? await res.json() : null;
 }
 
-/* =======================
-   AUTH
-======================= */
-
+/* LOGIN */
 app.get("/auth/discord", (req, res) => {
   const params = new URLSearchParams({
     client_id: DISCORD_CLIENT_ID,
@@ -96,6 +86,7 @@ app.get("/auth/discord", (req, res) => {
   res.redirect(`https://discord.com/oauth2/authorize?${params}`);
 });
 
+/* CALLBACK */
 app.get("/auth/discord/callback", async (req, res) => {
   const code = req.query.code;
   if (!code) return res.send("Missing code");
@@ -150,31 +141,16 @@ app.get("/auth/discord/callback", async (req, res) => {
   return res.redirect(`${FRONTEND_BASE_URL}/dashboard`);
 });
 
-/* =======================
-   SESSION CHECK
-======================= */
-
-app.get("/check-tester", async (req, res) => {
+/* SESSION CHECK */
+app.get("/check-tester", (req, res) => {
   const u = req.session.user;
   if (!u) return res.json({ authenticated: false });
-
-  const member = await getGuildMember(u.id);
-  const roles = member?.roles || [];
-
-  return res.json({
-    authenticated: true,
-    discord: u.username,
-    isTester: roles.some((r) => testerRoles.includes(r)),
-    isEditor: roles.some((r) => editorRoles.includes(r)),
-  });
+  return res.json({ authenticated: true, discord: u.username });
 });
 
-/* =======================
-   START
-======================= */
-
+/* ROOT */
 app.get("/", (req, res) => {
-  res.send("✅ Backend online");
+  res.send("✅ Backend Online");
 });
 
 const PORT = process.env.PORT || 8080;
