@@ -11,42 +11,40 @@ import { fileURLToPath } from "url";
 
 dotenv.config();
 
-// dirname fix
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// express
+// Express
 const app = express();
 app.set("trust proxy", 1);
 app.use(express.json());
 app.use(cors({ origin: process.env.FRONTEND_BASE_URL, credentials: true }));
 
-// session
+// Session
 app.use(
   session({
     secret: process.env.SESSION_SECRET,
     resave: false,
     saveUninitialized: true,
     cookie: {
-      secure: process.env.NODE_ENV === "production",
+      secure: true,
       sameSite: "lax",
     },
   })
 );
 
-// lowdb
+// LowDB
 const file = path.join(__dirname, "db.json");
 const adapter = new JSONFile(file);
 const db = new Low(adapter);
-
-async function initDB() {
+await init();
+async function init() {
   await db.read();
   db.data ||= { testers: {}, tests: {}, configs: {} };
   await db.write();
 }
-await initDB();
 
-// env
+// Env
 const {
   DISCORD_CLIENT_ID,
   DISCORD_CLIENT_SECRET,
@@ -59,18 +57,10 @@ const {
   FRONTEND_BASE_URL,
 } = process.env;
 
-// parse roles
-const testerRoles = (TESTER_ROLE_IDS || "")
-  .split(",")
-  .map((r) => r.trim())
-  .filter(Boolean);
+const testerRoles = TESTER_ROLE_IDS.split(",");
+const editorRoles = EDITOR_ROLE_IDS.split(",");
 
-const editorRoles = (EDITOR_ROLE_IDS || "")
-  .split(",")
-  .map((r) => r.trim())
-  .filter(Boolean);
-
-// helpers
+// Helpers
 function genTesterCode() {
   return crypto.randomBytes(3).toString("hex").toUpperCase();
 }
@@ -79,23 +69,19 @@ async function getUserInfo(access_token) {
   const res = await fetch("https://discord.com/api/v10/users/@me", {
     headers: { Authorization: `Bearer ${access_token}` },
   });
-  if (!res.ok) return null;
-  return await res.json();
+  return res.ok ? await res.json() : null;
 }
 
 async function getGuildMember(id) {
   const res = await fetch(
     `https://discord.com/api/v10/guilds/${GUILD_ID}/members/${id}`,
-    {
-      headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` },
-    }
+    { headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` } }
   );
-  if (!res.ok) return null;
-  return await res.json();
+  return res.ok ? await res.json() : null;
 }
 
 /* =======================
-   AUTH START
+   AUTH
 ======================= */
 
 app.get("/auth/discord", (req, res) => {
@@ -107,13 +93,11 @@ app.get("/auth/discord", (req, res) => {
     prompt: "consent",
   }).toString();
 
-  console.log("✅ OAuth redirect ->", DISCORD_REDIRECT_URI);
-
   res.redirect(`https://discord.com/oauth2/authorize?${params}`);
 });
 
 app.get("/auth/discord/callback", async (req, res) => {
-  const { code } = req.query;
+  const code = req.query.code;
   if (!code) return res.send("Missing code");
 
   const tokenRes = await fetch("https://discord.com/api/v10/oauth2/token", {
@@ -163,13 +147,11 @@ app.get("/auth/discord/callback", async (req, res) => {
     isEditor,
   };
 
-  console.log("✅ LOGIN OK, redirect dashboard");
-
   return res.redirect(`${FRONTEND_BASE_URL}/dashboard`);
 });
 
 /* =======================
-   CHECK SESSION
+   SESSION CHECK
 ======================= */
 
 app.get("/check-tester", async (req, res) => {
@@ -181,7 +163,6 @@ app.get("/check-tester", async (req, res) => {
 
   return res.json({
     authenticated: true,
-    id: u.id,
     discord: u.username,
     isTester: roles.some((r) => testerRoles.includes(r)),
     isEditor: roles.some((r) => editorRoles.includes(r)),
@@ -189,68 +170,14 @@ app.get("/check-tester", async (req, res) => {
 });
 
 /* =======================
-   SUBMIT TEST
-======================= */
-
-app.post("/submit-test", async (req, res) => {
-  const { testerCode, testType, result, details } = req.body;
-
-  await db.read();
-  const entry = db.data.testers[testerCode];
-  if (!entry) return res.json({ error: "Cod invalid" });
-
-  const userId = entry.userId;
-
-  const id = crypto.randomBytes(6).toString("hex");
-  db.data.tests[id] = {
-    id,
-    testerCode,
-    userId,
-    testType,
-    result,
-    details,
-    createdAt: new Date().toISOString(),
-  };
-  await db.write();
-
-  if (REPORT_CHANNEL_ID) {
-    try {
-      const embed = {
-        title: "Raport Test",
-        color: result === "ADMIS" ? 5763719 : 15548997,
-        fields: [
-          { name: "Rezultat", value: result },
-          { name: "Tip", value: testType },
-          { name: "Detalii", value: details || "—" },
-        ],
-        footer: { text: `UserID: ${userId}` },
-        timestamp: new Date().toISOString(),
-      };
-
-      await fetch(
-        `https://discord.com/api/v10/channels/${REPORT_CHANNEL_ID}/messages`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bot ${DISCORD_BOT_TOKEN}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ embeds: [embed] }),
-        }
-      );
-    } catch {}
-  }
-
-  res.json({ ok: true });
-});
-
-/* =======================
-   RUN
+   START
 ======================= */
 
 app.get("/", (req, res) => {
-  res.send("✅ Backend Running");
+  res.send("✅ Backend online");
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("✅ Backend on port", PORT));
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () =>
+  console.log(`✅ Backend running on port ${PORT}`)
+);
