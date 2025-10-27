@@ -17,20 +17,24 @@ const __dirname = path.dirname(__filename);
 
 // express
 const app = express();
+app.set("trust proxy", 1);
 app.use(express.json());
-app.use(cors({ origin: true, credentials: true }));
+app.use(cors({ origin: process.env.FRONTEND_BASE_URL, credentials: true }));
 
-// session storage
+// session
 app.use(
   session({
-    secret: process.env.SESSION_SECRET || "REPLACE_THIS",
+    secret: process.env.SESSION_SECRET,
     resave: false,
     saveUninitialized: true,
-    cookie: { secure: false },
+    cookie: {
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+    },
   })
 );
 
-// lowdb setup
+// lowdb
 const file = path.join(__dirname, "db.json");
 const adapter = new JSONFile(file);
 const db = new Low(adapter);
@@ -52,9 +56,10 @@ const {
   TESTER_ROLE_IDS,
   EDITOR_ROLE_IDS,
   REPORT_CHANNEL_ID,
+  FRONTEND_BASE_URL,
 } = process.env;
 
-// parse role lists
+// parse roles
 const testerRoles = (TESTER_ROLE_IDS || "")
   .split(",")
   .map((r) => r.trim())
@@ -65,12 +70,11 @@ const editorRoles = (EDITOR_ROLE_IDS || "")
   .map((r) => r.trim())
   .filter(Boolean);
 
-// helper: gen code
+// helpers
 function genTesterCode() {
   return crypto.randomBytes(3).toString("hex").toUpperCase();
 }
 
-// helper get user info
 async function getUserInfo(access_token) {
   const res = await fetch("https://discord.com/api/v10/users/@me", {
     headers: { Authorization: `Bearer ${access_token}` },
@@ -79,7 +83,6 @@ async function getUserInfo(access_token) {
   return await res.json();
 }
 
-// helper get member
 async function getGuildMember(id) {
   const res = await fetch(
     `https://discord.com/api/v10/guilds/${GUILD_ID}/members/${id}`,
@@ -95,7 +98,6 @@ async function getGuildMember(id) {
    AUTH START
 ======================= */
 
-// login redirect
 app.get("/auth/discord", (req, res) => {
   const params = new URLSearchParams({
     client_id: DISCORD_CLIENT_ID,
@@ -105,10 +107,11 @@ app.get("/auth/discord", (req, res) => {
     prompt: "consent",
   }).toString();
 
+  console.log("✅ OAuth redirect ->", DISCORD_REDIRECT_URI);
+
   res.redirect(`https://discord.com/oauth2/authorize?${params}`);
 });
 
-// callback
 app.get("/auth/discord/callback", async (req, res) => {
   const { code } = req.query;
   if (!code) return res.send("Missing code");
@@ -135,7 +138,6 @@ app.get("/auth/discord/callback", async (req, res) => {
   const isTester = roles.some((r) => testerRoles.includes(r));
   const isEditor = roles.some((r) => editorRoles.includes(r));
 
-  // gen code if tester
   await db.read();
   let entry = Object.entries(db.data.testers).find(
     ([, v]) => v.userId === user.id
@@ -161,12 +163,13 @@ app.get("/auth/discord/callback", async (req, res) => {
     isEditor,
   };
 
-  // FINAL redirect to NETLIFY dashboard
-  res.redirect("https://ipjlossantos.netlify.app/dashboard");
+  console.log("✅ LOGIN OK, redirect dashboard");
+
+  return res.redirect(`${FRONTEND_BASE_URL}/dashboard`);
 });
 
 /* =======================
-   SESSION CHECK
+   CHECK SESSION
 ======================= */
 
 app.get("/check-tester", async (req, res) => {
@@ -242,75 +245,12 @@ app.post("/submit-test", async (req, res) => {
 });
 
 /* =======================
-   ADMIN CONFIG TEST
+   RUN
 ======================= */
 
-async function requireEditor(req, res, next) {
-  const u = req.session.user;
-  if (!u) return res.status(401).json({ error: "Not auth" });
-
-  const member = await getGuildMember(u.id);
-  const roles = member?.roles || [];
-
-  if (!roles.some((r) => editorRoles.includes(r)))
-    return res.status(403).json({ error: "Forbidden" });
-
-  next();
-}
-
-app.post("/manage-tests/config", requireEditor, async (req, res) => {
-  const { testName, timeLimitSeconds, questionsCount, maxMistakes } = req.body;
-
-  await db.read();
-  db.data.configs[testName] = {
-    testName,
-    timeLimitSeconds,
-    questionsCount,
-    maxMistakes,
-  };
-  await db.write();
-
-  res.json({ ok: true, config: db.data.configs[testName] });
+app.get("/", (req, res) => {
+  res.send("✅ Backend Running");
 });
-
-/* =======================
-   HISTORY
-======================= */
-
-app.get("/tests/history", async (req, res) => {
-  await db.read();
-  const tests = Object.values(db.data.tests).sort(
-    (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
-  );
-  res.json({ tests });
-});
-
-/* =======================
-   STATS
-======================= */
-
-app.get("/tests/stats", async (req, res) => {
-  await db.read();
-  const tests = Object.values(db.data.tests);
-
-  const byType = {};
-  const byResult = { ADMIS: 0, RESPINS: 0 };
-  const byDay = {};
-
-  tests.forEach((t) => {
-    byType[t.testType] = (byType[t.testType] || 0) + 1;
-    byResult[t.result]++;
-
-    const day = t.createdAt.split("T")[0];
-    byDay[day] = (byDay[day] || 0) + 1;
-  });
-
-  res.json({ byType, byResult, byDay });
-});
-
-/* =======================
-   START SERVER
-======================= */
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("✅ Backend running on", PORT));
+app.listen(PORT, () => console.log("✅ Backend on port", PORT));
