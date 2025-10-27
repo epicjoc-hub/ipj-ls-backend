@@ -10,19 +10,14 @@ import { JSONFile } from "lowdb/node";
 import path from "path";
 import { fileURLToPath } from "url";
 
-// load env
 dotenv.config();
 
-// dirname fix (ESM)
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// express app
 const app = express();
 app.set("trust proxy", 1);
 app.use(express.json());
-
-// CORS (frontend Netlify)
 app.use(
   cors({
     origin: process.env.FRONTEND_BASE_URL,
@@ -30,16 +25,12 @@ app.use(
   })
 );
 
-// sessions (IMPORTANT !!!)
 app.use(
   session({
     secret: process.env.SESSION_SECRET || "REPLACE_THIS",
     resave: false,
     saveUninitialized: true,
-    cookie: {
-      secure: true,
-      sameSite: "none",
-    },
+    cookie: { secure: true, sameSite: "none" },
   })
 );
 
@@ -47,15 +38,11 @@ app.use(
 const file = path.join(__dirname, "db.json");
 const adapter = new JSONFile(file);
 const db = new Low(adapter);
+await db.read();
+db.data ||= { testers: {}, tests: {}, configs: {}, duty: {}, pings: [] };
+await db.write();
 
-async function initDB() {
-  await db.read();
-  db.data ||= { testers: {}, tests: {}, configs: {} };
-  await db.write();
-}
-await initDB();
-
-// env
+// ENV
 const {
   DISCORD_CLIENT_ID,
   DISCORD_CLIENT_SECRET,
@@ -68,44 +55,36 @@ const {
   FRONTEND_BASE_URL,
 } = process.env;
 
-// roles from .env
-const testerRoles = (TESTER_ROLE_IDS || "")
-  .split(",")
-  .map((r) => r.trim())
-  .filter(Boolean);
+// roles
+const testerRoles = (TESTER_ROLE_IDS || "").split(",").map(s=>s.trim()).filter(Boolean);
+const editorRoles = (EDITOR_ROLE_IDS || "").split(",").map(s=>s.trim()).filter(Boolean);
 
-const editorRoles = (EDITOR_ROLE_IDS || "")
-  .split(",")
-  .map((r) => r.trim())
-  .filter(Boolean);
+// special roles (cerute)
+const RADIO_INSTR_ROLE = "1280907729950736427";
+const MDT_INSTR_ROLE   = "1280907912876916830";
+const TESTER_ROLE_ANY  = "1163218630620749834"; // tester general
 
-// random tester code
-function genTesterCode() {
-  return crypto.randomBytes(3).toString("hex").toUpperCase();
+// helpers
+async function discordGET(url, headers={}) {
+  const r = await fetch(url, { headers });
+  if (!r.ok) return null;
+  return await r.json();
 }
-
-// discord utility calls
 async function getUserInfo(access_token) {
-  const res = await fetch("https://discord.com/api/v10/users/@me", {
-    headers: { Authorization: `Bearer ${access_token}` },
+  return await discordGET("https://discord.com/api/v10/users/@me", {
+    Authorization: `Bearer ${access_token}`,
   });
-  if (!res.ok) return null;
-  return await res.json();
 }
-
 async function getGuildMember(id) {
-  const res = await fetch(
+  return await discordGET(
     `https://discord.com/api/v10/guilds/${GUILD_ID}/members/${id}`,
-    { headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` } }
+    { Authorization: `Bot ${DISCORD_BOT_TOKEN}` }
   );
-  if (!res.ok) return null;
-  return await res.json();
 }
 
 /* =======================
    AUTH
 ======================= */
-
 app.get("/auth/discord", (req, res) => {
   const params = new URLSearchParams({
     client_id: DISCORD_CLIENT_ID,
@@ -114,7 +93,6 @@ app.get("/auth/discord", (req, res) => {
     scope: "identify guilds.members.read",
     prompt: "consent",
   }).toString();
-
   res.redirect(`https://discord.com/oauth2/authorize?${params}`);
 });
 
@@ -133,221 +111,45 @@ app.get("/auth/discord/callback", async (req, res) => {
     }),
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
   });
-
   const tokenData = await tokenRes.json();
   if (!tokenData.access_token) return res.send("OAuth failed");
 
   const user = await getUserInfo(tokenData.access_token);
   const member = await getGuildMember(user.id);
-
   const roles = member?.roles || [];
-  const isTester = roles.some((r) => testerRoles.includes(r));
+
+  const isTester = roles.some((r) => testerRoles.includes(r) || r === TESTER_ROLE_ANY);
   const isEditor = roles.some((r) => editorRoles.includes(r));
-
-  // generate tester code if needed
-  await db.read();
-  let entry = Object.entries(db.data.testers).find(
-    ([, v]) => v.userId === user.id
-  );
-
-  if (isTester && !entry) {
-    let code;
-    do code = genTesterCode();
-    while (db.data.testers[code]);
-
-    db.data.testers[code] = {
-      userId: user.id,
-      createdAt: new Date().toISOString(),
-    };
-    await db.write();
-  }
+  const canRadio = roles.includes(RADIO_INSTR_ROLE);
+  const canMDT   = roles.includes(MDT_INSTR_ROLE);
 
   req.session.user = {
     id: user.id,
     discord_tag: `${user.username}#${user.discriminator}`,
     isTester,
     isEditor,
+    canRadio,
+    canMDT,
   };
 
   return res.redirect(`${FRONTEND_BASE_URL}/dashboard`);
 });
 
 /* =======================
-   SESSION CHECK
+   SESSION
 ======================= */
-
 app.get("/check-tester", (req, res) => {
   const u = req.session.user;
   if (!u) return res.json({ authenticated: false });
-
   return res.json({
     authenticated: true,
     discord_tag: u.discord_tag,
     isTester: u.isTester,
     isEditor: u.isEditor,
+    canRadio: u.canRadio,
+    canMDT: u.canMDT,
   });
 });
-
-/* =======================
-   TESTER CODE
-======================= */
-
-app.get("/tester-code", async (req, res) => {
-  const u = req.session.user;
-  if (!u) return res.json({ code: null });
-
-  await db.read();
-  const entry = Object.entries(db.data.testers).find(
-    ([, v]) => v.userId === u.id
-  );
-
-  return res.json({
-    code: entry ? entry[0] : null,
-  });
-});
-
-/* =======================
-   SUBMIT TEST
-======================= */
-
-app.post("/submit-test", async (req, res) => {
-  const { testerCode, testType, result, details } = req.body;
-
-  await db.read();
-  const entry = db.data.testers[testerCode];
-  if (!entry) return res.json({ error: "Cod candidat invalid" });
-
-  const userId = entry.userId;
-
-  const id = crypto.randomBytes(6).toString("hex");
-  db.data.tests[id] = {
-    id,
-    testerCode,
-    userId,
-    testType,
-    result,
-    details,
-    createdAt: new Date().toISOString(),
-  };
-  await db.write();
-
-  // send embed to Discord channel
-  if (REPORT_CHANNEL_ID) {
-    try {
-      const embed = {
-        title: "Raport Test",
-        color: result === "ADMIS" ? 5763719 : 15548997,
-        fields: [
-          { name: "Rezultat", value: result },
-          { name: "Tip", value: testType },
-          { name: "Detalii", value: details || "—" },
-        ],
-        footer: { text: `UserID: ${userId}` },
-        timestamp: new Date().toISOString(),
-      };
-
-      await fetch(
-        `https://discord.com/api/v10/channels/${REPORT_CHANNEL_ID}/messages`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bot ${DISCORD_BOT_TOKEN}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ embeds: [embed] }),
-        }
-      );
-    } catch (e) {
-      console.log("Discord embed error:", e);
-    }
-  }
-
-  res.json({ ok: true });
-});
-
-/* =======================
-   ADMIN CONFIG (editor only)
-======================= */
-
-async function requireEditor(req, res, next) {
-  const u = req.session.user;
-  if (!u) return res.status(401).json({ error: "Not auth" });
-
-  const member = await getGuildMember(u.id);
-  const roles = member?.roles || [];
-
-  if (!roles.some((r) => editorRoles.includes(r)))
-    return res.status(403).json({ error: "Forbidden" });
-
-  next();
-}
-
-app.post("/manage-tests/config", requireEditor, async (req, res) => {
-  const { testName, timeLimitSeconds, questionsCount, maxMistakes } = req.body;
-
-  await db.read();
-  db.data.configs[testName] = {
-    testName,
-    timeLimitSeconds,
-    questionsCount,
-    maxMistakes,
-  };
-  await db.write();
-
-  res.json({ ok: true, config: db.data.configs[testName] });
-});
-
-/* =======================
-   CONFIG GET
-======================= */
-
-app.get("/config/:name", async (req, res) => {
-  await db.read();
-  return res.json(db.data.configs[req.params.name] || {});
-});
-
-/* =======================
-   HISTORY
-======================= */
-
-app.get("/tests/history", async (req, res) => {
-  await db.read();
-  const tests = Object.values(db.data.tests).sort(
-    (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
-  );
-  res.json({ tests });
-});
-
-/* =======================
-   STATS
-======================= */
-
-app.get("/tests/stats", async (req, res) => {
-  await db.read();
-  const tests = Object.values(db.data.tests);
-
-  const byType = {};
-  const byResult = { ADMIS: 0, RESPINS: 0 };
-  const byDay = {};
-
-  tests.forEach((t) => {
-    // tip
-    byType[t.testType] = (byType[t.testType] || 0) + 1;
-
-    // rezultat
-    byResult[t.result]++;
-
-    // pe zile
-    const day = t.createdAt.split("T")[0];
-    byDay[day] = (byDay[day] || 0) + 1;
-  });
-
-  res.json({ byType, byResult, byDay });
-});
-
-/* =======================
-   LOGOUT
-======================= */
 
 app.get("/logout", (req, res) => {
   req.session.destroy(() => {
@@ -357,18 +159,207 @@ app.get("/logout", (req, res) => {
 });
 
 /* =======================
-   HOME
+   CONFIG (editor)
 ======================= */
+async function requireEditor(req, res, next) {
+  const u = req.session.user;
+  if (!u) return res.status(401).json({ error: "Not auth" });
 
-app.get("/", (req, res) => {
-  res.send("✅ Backend online & ready");
+  // verifică live rolurile
+  const member = await getGuildMember(u.id);
+  const roles = member?.roles || [];
+  if (!roles.some((r) => editorRoles.includes(r)))
+    return res.status(403).json({ error: "Forbidden" });
+
+  next();
+}
+
+app.get("/config/:name", async (req, res) => {
+  await db.read();
+  return res.json(db.data.configs[req.params.name] || {});
+});
+app.get("/config", async (req, res) => {
+  await db.read();
+  return res.json(db.data.configs);
+});
+app.post("/manage-tests/config", requireEditor, async (req, res) => {
+  const { testName, timeLimitSeconds, questionsCount, maxMistakes } = req.body;
+  await db.read();
+  db.data.configs[testName] = { testName, timeLimitSeconds, questionsCount, maxMistakes };
+  await db.write();
+  res.json({ ok: true, config: db.data.configs[testName] });
+});
+app.delete("/manage-tests/config/:name", requireEditor, async (req, res) => {
+  await db.read();
+  delete db.data.configs[req.params.name];
+  await db.write();
+  return res.json({ ok: true });
 });
 
 /* =======================
-   START SERVER
+   TESTS DATA
 ======================= */
+app.get("/tests/history", async (req, res) => {
+  await db.read();
+  const tests = Object.values(db.data.tests).sort(
+    (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+  );
+  res.json({ tests });
+});
+app.get("/tests/stats", async (req, res) => {
+  await db.read();
+  const tests = Object.values(db.data.tests);
+  const byType = {};
+  const byResult = { ADMIS: 0, RESPINS: 0 };
+  const byDay = {};
+  tests.forEach((t) => {
+    byType[t.testType] = (byType[t.testType] || 0) + 1;
+    byResult[t.result]++;
+    const day = t.createdAt.split("T")[0];
+    byDay[day] = (byDay[day] || 0) + 1;
+  });
+  res.json({ byType, byResult, byDay });
+});
+
+/* =======================
+   DUTY
+======================= */
+// user intră on duty cu roluri (["radio", "mdt", "general"])
+app.post("/duty/on", (req, res) => {
+  const u = req.session.user;
+  if (!u) return res.status(401).json({ error: "Not auth" });
+
+  const roles = Array.isArray(req.body.roles) ? req.body.roles : [];
+  db.data.duty[u.id] = {
+    id: u.id,
+    tag: u.discord_tag,
+    roles: [
+      ...(u.canRadio ? ["radio"] : []),
+      ...(u.canMDT ? ["mdt"] : []),
+      ...(u.isTester ? ["general"] : []),
+      ...roles.filter((x) => ["radio", "mdt", "general"].includes(x)),
+    ],
+    since: new Date().toISOString(),
+  };
+  db.write();
+  broadcast({ type: "duty-update", payload: db.data.duty });
+  res.json({ ok: true });
+});
+
+app.post("/duty/off", (req, res) => {
+  const u = req.session.user;
+  if (!u) return res.status(401).json({ error: "Not auth" });
+  delete db.data.duty[u.id];
+  db.write();
+  broadcast({ type: "duty-update", payload: db.data.duty });
+  res.json({ ok: true });
+});
+
+app.get("/duty/list", async (req, res) => {
+  await db.read();
+  return res.json(db.data.duty);
+});
+
+// verificare dacă există instructor pentru un test
+app.get("/duty/allow/:type", async (req, res) => {
+  const type = String(req.params.type || "").toLowerCase();
+  await db.read();
+  const duty = Object.values(db.data.duty);
+  const allowed =
+    type === "radio"
+      ? duty.some((u) => u.roles.includes("radio"))
+      : type === "mdt"
+      ? duty.some((u) => u.roles.includes("mdt"))
+      : false;
+  res.json({ allowed, duty });
+});
+
+/* =======================
+   LIVE PINGS (SSE)
+======================= */
+const sseClients = new Set(); // { res, userId }
+function broadcast(obj) {
+  const data = `data: ${JSON.stringify(obj)}\n\n`;
+  for (const client of sseClients) {
+    client.res.write(data);
+  }
+}
+
+// subscribe la evenimente (instructori/privesc pings + duty update)
+app.get("/events", (req, res) => {
+  const u = req.session.user;
+  if (!u) return res.status(401).end();
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+
+  res.write(`data: ${JSON.stringify({ type: "hello", payload: { now: Date.now() } })}\n\n`);
+
+  const client = { res, userId: u.id };
+  sseClients.add(client);
+
+  req.on("close", () => {
+    sseClients.delete(client);
+    res.end();
+  });
+});
+
+// candidat/agent solicită instructor pt test
+app.post("/call-instructor", async (req, res) => {
+  const { testType, note } = req.body || {};
+  const u = req.session.user;
+  if (!u) return res.status(401).json({ error: "Not auth" });
+
+  const id = crypto.randomBytes(6).toString("hex");
+  const ping = {
+    id,
+    testType: (testType || "").toLowerCase(), // "radio" | "mdt"
+    note: note || "",
+    requester: { id: u.id, tag: u.discord_tag },
+    time: new Date().toISOString(),
+    status: "open",
+  };
+
+  await db.read();
+  db.data.pings.push(ping);
+  await db.write();
+
+  broadcast({ type: "ping", payload: ping });
+  res.json({ ok: true, id });
+});
+
+// instructor acceptă
+app.post("/ack-ping", async (req, res) => {
+  const { id } = req.body || {};
+  const u = req.session.user;
+  if (!u) return res.status(401).json({ error: "Not auth" });
+
+  await db.read();
+  const ping = db.data.pings.find((p) => p.id === id);
+  if (!ping) return res.status(404).json({ error: "Not found" });
+
+  // verifică rolul instructorului
+  if (ping.testType === "radio" && !u.canRadio)
+    return res.status(403).json({ error: "Nu ai rol de Instructor Radio" });
+  if (ping.testType === "mdt" && !u.canMDT)
+    return res.status(403).json({ error: "Nu ai rol de Instructor MDT" });
+
+  ping.status = "accepted";
+  ping.acceptedBy = { id: u.id, tag: u.discord_tag };
+  await db.write();
+
+  broadcast({ type: "ack", payload: ping });
+  res.json({ ok: true });
+});
+
+/* =======================
+   ROOT
+======================= */
+app.get("/", (req, res) => {
+  res.send("✅ Backend online & live events ready");
+});
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () =>
-  console.log(`✅ Backend running on port ${PORT}`)
-);
+app.listen(PORT, () => console.log("✅ Backend running on", PORT));
